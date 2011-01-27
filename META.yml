@@ -1,0 +1,43 @@
+---
+abstract: 'Automatic MKV converter, with (we hope) smart behavior'
+author:
+  - 'Stirling Westrup <swestrup@gmail.com>'
+build_requires:
+  English: 0
+  Test::More: 0
+configure_requires:
+  ExtUtils::MakeMaker: 6.31
+dynamic_config: 0
+generated_by: 'Dist::Zilla version 4.101900, CPAN::Meta::Converter version 2.102400'
+license: gpl
+meta-spec:
+  url: http://module-build.sourceforge.net/META-spec-v1.4.html
+  version: 1.4
+name: App-FileTools-AutoMKV
+requires:
+  Archive::Any: 0
+  Capture::Tiny: 0
+  Carp: 0
+  Cwd: 0
+  Data::Dump: 0
+  DateTime: 0
+  Encode: 0
+  File::Basename: 0
+  File::MimeInfo::Magic: 0
+  File::Spec: 0
+  FileHandle: 0
+  FindBin: 0
+  Getopt::Long: 0
+  IO::Interactive: 0
+  Lingua::EN::Titlecase: 0
+  Locales: 0
+  MIME::Types: 0
+  Pod::Text::Termcap: 0
+  Pod::Usage: 0
+  String::ShellQuote: 0
+  Text::Balanced: 0
+  enum: 0
+  open: 0
+  perl: 5.008
+  utf8: 0
+version: 0.01

@@ -1,0 +1,163 @@
+Revision History for App-FileTools-AutoMKV
+==========================================
+
+v0.01 2011-01-27
+----------------
+
+* Date: 2011-01-27 11:08:28 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: 413434c622717c728645323d6c3a49aa3be035a9
+
+    Ignore test.pl
+
+* Date: 2011-01-27 11:06:29 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: adda5ed6fb6cbb6d7657c59cecfda9b1dddcb062
+
+    Added some testing files to the repository
+
+* Date: 2011-01-27 11:03:46 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: e6dde80fe315c588538528ac199c1e0eb50e6bb5
+
+    Added a .gitignore
+
+* Date: 2011-01-27 11:01:49 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: ffceb1adb2010dc70d35c22b6ed244e65f12a58c
+
+    Minor fixups before first release
+
+* Date: 2011-01-27 10:08:27 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: cb10361ce9292580bf031103529b815196b157a1
+
+    Return error code of 0 for requesting a man page
+
+* Date: 2011-01-27 10:03:34 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: 43a180e268f8f47e1cf821f845c6440038459f1f
+
+    Fixed Documentation on option flags
+
+* Date: 2011-01-27 10:01:49 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: 76415233f7eee6ae51a4af8761e9795c282fed4f
+
+    Updated Documentation
+
+* Date: 2011-01-16 06:24:48 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: a36ca331f5f37587eb04eb2993fed5636b247aad
+
+    Minor adjustments to process tracing
+
+* Date: 2011-01-15 16:04:01 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: a4aed636e1d370e74a7f182248a3b34646307f3d
+
+    Tracked down and squashed some annoying utf8 encoding bugs
+
+* Date: 2011-01-15 12:01:04 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: 284d4de61f33fe6d498f22970cd381e630d47987
+
+    few more bug fixes.
+
+* Date: 2011-01-15 09:18:53 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: a5fca86f5b42f84bb92b3656c51d4d7360d5e8d1
+
+    Now handles separate subtitle files in simple cases.
+
+* Date: 2011-01-15 07:18:30 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: d3a56fecc0ecd54721cc6cf880a4e148a6920f7f
+
+    Minor documentation update.
+
+* Date: 2011-01-15 03:35:47 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: 449d8b96f45e04d92838265f3d6612ddcebb3a2a
+
+    Minor documentation update.
+
+* Date: 2011-01-15 02:35:31 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: 8aa5e48f40870dd81376cb147a6d3434978e7d4d
+
+    Fixed a bug with utf8 output, and added some more tag parsing.
+
+* Date: 2011-01-14 09:50:42 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: e55472b9781b3c056b70eb2cc0a799f4c54e8869
+
+    Can now handle year+number instead of season+episode, but not both
+    (yet)
+
+* Date: 2011-01-14 09:01:30 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: 15652c5321879d324b20303b33ba5b30e6a4d607
+
+    fixed a bug where I missed converting one '8316arg{name}' to
+    '8316arg{filename}'
+
+* Date: 2011-01-14 08:01:22 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: da0c84c3aab9980a72711321987eb9b7cd6319ee
+
+    Distinguished internal 'name' from 'filename'
+
+* Date: 2011-01-14 06:57:11 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: 51d1c95bf8ea28ace357d18170904963c32afbcf
+
+    Tweaked language handling to not be quite so broken. Still needs work.
+
+* Date: 2011-01-13 03:50:52 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: 57ea6b571ed411db6599d3cbeaad2fc67cde5858
+
+    lots more work on multi-file setups, plus started getting ready to
+    release
+
+* Date: 2011-01-12 16:02:55 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: c6d608790be64d3f48700e67e0b49dfd1bf7bf44
+
+    started putting in code to handle auxiliary files
+
+* Date: 2011-01-11 12:22:39 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: 34c001ddf9689eaa0240257792f397ab1004f901
+
+    Still more tweaks to filename parsing.
+
+* Date: 2011-01-10 23:08:41 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: 8b67487324f513f7ccb083f0d78863a71d47bfd3
+
+    Still more parsing updates.
+
+* Date: 2011-01-10 22:12:33 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: ad072f92b1d88a478695ac1a7109971b7f028efa
+
+    even better breaking of input into pieces
+
+* Date: 2011-01-10 00:15:39 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: 4c84566ff87a42d46e696b7a8ec96089b9e91104
+
+    Many many improvements in name parsing. Still a ways to go, though.
+
+* Date: 2011-01-07 14:46:35 -0500
+  Commit: Stirling Westrup <swestrup@gmail.com>
+  Hash: ee2437fca82129956f5aecd0dea7741e1f0d4ca8
+
+    Added year detection, and cleaned up verbose reporting a bit.
+
+
+===================================
+End of changes in the last 365 days
+===================================

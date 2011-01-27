@@ -1,0 +1,152 @@
+AUTOMKV(1)            User Contributed Perl Documentation           AUTOMKV(1)
+
+
+
+NNAAMMEE
+       automkv - Automatic MKV converter, with (we hope) smart behavior
+
+SSYYNNOOPPSSIISS
+       automkv [_g_l_o_b_a_l_-_o_p_t_i_o_n_s] [ [file-options ...] [file ...] ... ]
+
+         Global Information Options:
+           -? | --help                    Display brief help message and exit.
+           -S | --show                    Display specified information and exit.
+           -M | --man                     Print the manual page and exit.
+           -R | --readme                  Print the README for the program, and exit.
+           -V | --version                 Print the version information and exit.
+
+         Global Processing Options:
+           -n | --no-operation | --nop    Report what would be done, but don't do it.
+           -v | --verbose                 Report on what's being done.
+           -A | --assume                  Assume some data about the files.
+           -D | --debug                   Provide debug output.
+           -L | --default-language        Default language for all streams.
+           -O | --outdir                  Set path to output directory.
+           -P | --default-presentation    Default name for all grouped content.
+
+DDEESSCCRRIIPPTTIIOONN
+       aauuttoommkkvv is currently in alpha state and, as such, may not be suitable
+       for any particular use. In fact due to how far it yet has to go before
+       meeting its minimal design specs, if it IS currently suitable for some
+       task, it is unlikely to remain that way as it evolves.
+
+       aauuttoommkkvv attempts to intelligently determine how to convert one ( or
+       more) files into a .mkv file, incorporating all available metadata as
+       it does so. So far, its still pretty dumb, fails to actually include
+       much of the metadata is manages to deduce.
+
+       aauuttoommkkvv is intended to be able to look at a set of media files in a
+       directory tree, probe their contents, and (perhaps using additional
+       information provided on the command line) deduce the relationships (if
+       any) between the files, and gather all relevant metadata about the
+       related files.
+
+       Once all the metadata for a file or set of related files has been
+       gathered, then automkv is supposed to work out which files can usefully
+       be combined, and in which ways, and carry that out, such as merging
+       subtitle or commentary files with their .avi file, or joining together
+       two halves of a long movie into a single file, all controlled by a user
+       policy that also dictates the final output file names of the newly
+       created .mkv files.
+
+       It is hoped that automkv will eventually be sophisticated enough to be
+       allowed to run as a directory monitor, automatically converting all
+       files that are stored in the monitored directories. That day is
+       currently still a long way off.
+
+       In practice, it is currently often necessary to assist automkv by
+       giving it assumptions on the command line, such as what to assume the
+       episode name of a tv series is. How it makes use of this extra data is
+       both under-documented and undergoing rapid flux at the moment. I fear
+       that this documentation is likely to always lag behind the reality
+       until version 1.0 comes out.
+
+OOPPTTIIOONNSS
+   GGLLOOBBAALL IINNFFOORRMMAATTIIOONNAALL OOPPTTIIOONNSS
+       --?? | ----hheellpp
+               Prints a brief help message, and exits.
+
+       --SS | ----sshhooww STR
+               Prints the requested information, then exits. This option can
+               be invoked multiple times to request multiple types of
+               information, or a single comma-separated string can be passed
+               to specify the desired information types. Currently allowed
+               queries are:
+
+               llaanngg    List all accepted language codes.
+
+               ttaaggss    Lists all tags accepted by the --assume option. At
+                       least, this is the theory. Currently all possible tags
+                       are accepted, and most are ignored. Once the internal
+                       processing model settles down, this will provide actual
+                       information.
+
+       --MM| ----mmaann
+               Prints the manpage for the program, and exits.
+
+       --VV | ----vveerrssiioonn
+               Prints the version of the program, and exits.
+
+   GGLLOOBBAALL PPRROOCCEESSSSIINNGG OOPPTTIIOONNSS
+       --VV | ----vveerrbboossee
+               Asks automkv to produce more information about its internal
+               processing. Currently this doesn't do much as automkv is often
+               already too verbose.
+
+       --DD | ----ddeebbuugg
+               Asks automkv to dump various data structures as it works, so
+               that one can attempt to figure out what its doing, and debug
+               it. Even if you are not trying to fix the progam, this can be
+               useful just to see what internal processing tags are being
+               used. These are good candidates to use to tweak automkv's
+               behavior using the -A flag below.
+
+       --AA | ----aassssuummee TAG=VALUE
+               Tells automkv to assume something about file it is processing.
+               This can be used to provide information to automkv that it
+               would not otherwise be able to gather. A full set of accepted
+               tags and their meanings can be gathered by calling automkv with
+               '--show tags', but here's a partial list:
+
+               nnaammee        This tells automkv to what to assume for the
+                           untagged part of the filename, rather than deriving
+                           it by stripping tags off the filename.
+
+               sshhoowwnnaammee    If automkv knows the name of the show, it will
+                           assume that the file stem is an episode name.
+
+               eeppiissooddeess    If automkv knows the total number of seasons it
+                           will ensure that no more digits are used for an
+                           episode number than will be required. It will also
+                           use the number of episodes to produce tags like 'xx
+                           of yy' for files that lack a season number (such as
+                           miniseries and documentaries).
+
+               sseeaassoonnss     Tells automkv how many seasons there are in a show.
+                           This is useful to make it use more or few digits in
+                           a season name.
+
+       --LL | ----ddeeffaauulltt--llaanngguuaaggee STR
+               Specifies the language to be assumed for all stream content
+               that doesn't otherwise have a specified language. This takes a
+               3-letter ISO code for the language. The current list of
+               accepted ISO codes can be determined from the "--show lang"
+               option.
+
+               If no default language is specified, the default-default is
+               English (eng).
+
+       --PP | ----ddeeffaauulltt--pprreesseennttaattiioonn STR
+               This gives a default 'presentation' name that is used as an
+               internal title of all tracks which follow (and which do not
+               explicitly specify titles or presentation names of their own)
+               until changed by another use of this option.
+
+               If not set, the default for this is 'Feature' which means that
+               all sound, video and subtitle tracks which are found will
+               default to a title of 'Feature' to indicate that they are part
+               of the main feature presentation.
+
+
+
+perl v5.10.1                      2011-01-27                        AUTOMKV(1)

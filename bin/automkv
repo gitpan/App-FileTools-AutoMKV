@@ -1,0 +1,1946 @@
+#!/usr/bin/perl -w
+
+# use 5.010;
+
+package main;
+use strict;
+use warnings;
+use utf8;
+
+BEGIN
+  { $main::VERSION = substr '$$Version: 0.01 $$', 11, -3; }
+
+use open IO    => ':utf8';
+binmode STDIN  => ':utf8';
+binmode STDOUT => ':utf8';
+binmode STDERR => ':utf8';
+
+use FindBin qw($RealBin);
+FindBin::again(); # Other modules can call FindBin too.
+
+use lib "$RealBin/../lib"; # Relative path to our libraries.
+
+use Archive::Any;
+use Carp;
+use Capture::Tiny qw(capture_merged);
+use Cwd qw/abs_path/;
+use Data::Dump qw/dd pp/;
+use DateTime;
+use Encode qw/encode_utf8 decode_utf8/;
+use File::MimeInfo::Magic ();
+use File::Basename;
+use File::Spec;
+use FileHandle;
+use Getopt::Long qw(HelpMessage VersionMessage);
+use IO::Interactive qw(is_interactive);
+use Lingua::EN::Titlecase;
+use Locales;
+use MIME::Types;
+use Pod::Text::Termcap;
+use Pod::Usage;
+use String::ShellQuote;
+use Text::Balanced qw/extract_multiple extract_bracketed/;
+
+# Prettify usage output if its going to a terminal.
+$Pod::Usage::ISA[0]='Pod::Text::Termcap' if is_interactive();
+
+######################[	Configuration Section ]#######################
+
+use enum qw(:ERR_ NONE SHOW);
+
+# hashref of completed 'jobs';
+my $jobs;
+
+my %cfg	=			# Configuration storage hash
+  ( 'default-language'     => 'eng'
+  , 'default-presentation' => 'Feature'
+  );
+
+my @opts =
+  ( '<>'		       => \&HandleArg
+  , 'help|?'		       => \&ConfigHelp
+  , 'assume|A=s%'
+  , 'debug|D'
+  , 'default-language|L=s'
+  , 'default-presentation|P=s'
+  , 'man|M'		       => \&ConfigMan
+  , 'outdir|O=s'
+  , 'readme|R'		       => \&ConfigReadMe
+  , 'show|S=s'		       => \&OptionShow
+  , 'nop|no-operation|n'
+  , 'verbose|v'
+  , 'version|V'		       => \&ConfigVersion
+  );
+
+my $cli = new Getopt::Long::Parser
+  config =>
+    [ 'bundling'
+    , 'no_auto_abbrev'
+    , 'no_gnu_compat'
+    , 'no_ignore_case'
+    , 'auto_version'
+    , 'auto_help'
+    , 'permute'
+    ];
+
+sub ConfigUsage
+  { my $x = shift;
+
+    pod2usage
+      ( -exitval => $x
+      , -verbose => 0
+      );
+  }
+
+sub ConfigHelp
+  {
+    pod2usage
+      ( -exitval => 0
+      , -verbose => 1
+      );
+  }
+
+sub ConfigVersion
+  {
+    print "Version: ",$main::VERSION,"\n";
+    exit 0;
+  }
+
+sub ConfigMan
+  {
+    pod2usage
+      ( -exitval  => 0
+      , -verbose  => 2
+      );
+  }
+
+sub ConfigReadMe
+  {
+    pod2usage
+      ( -exitval  => 0
+      , -verbose  => 2
+      );
+  }
+
+
+########################[ Processing Section ]########################
+
+# This entire scheme works by building a hash of properties and
+# associated values for the files it encounters, and later using these
+# to determine what its going to do. Here are the top-level properties
+# in the hash so far, and what they are used for:
+
+# arg           - raw argument as it was input.
+# pathname      - the fully expanded pathname of an argument
+# vol           - the volume (if any) that argument is in.
+# path          - the path that argument is in.
+# base          - filename with extent and path stripped off.
+# stem          - basename with tags, series name and episode number stripped.
+# ext           - the extension that argument has.
+# mime          - an object holding our best guess at the mimetype of the
+#                 full name
+# track         - a hash of track properties, with the keys being track ids:
+#                 format - fourcc code for the track
+#                 type   - one of 'audio', 'video' or 'subtitle'.
+# newname       - synthesized name from available data.
+# title         - stem converted to a title.
+# stubname      - name used to look for related files
+# season        - season number (if any) of the series.
+# episode       - episode number within a season
+# episodes      - total episodes in the run of a mini-series.
+# showindex     - combined season/episode numbers for display
+# scene-group   - the name of the ripping group if its a scene release.
+# dist-site     - name of distribution site. Usually a website
+# episodedigits - how many display digits in an episode
+# seasondigits  - how many display digits in a season
+
+my @langtable = 
+  ( ['aar', ['aa'],['Afar']]
+  , ['abk', ['ab'],['Abkhazian']]
+  , ['ace', undef, ['Achinese']]
+  , ['ach', undef, ['Acoli']]
+  , ['ada', undef, ['Adangme']]
+  , ['ady', undef, ['Adygei','Adyghe']]
+  , ['afa', undef, ['Afro-Asiatic']]
+  , ['afh', undef, ['Afrihili']]
+  , ['afr', ['af'],['Afrikaans']]
+  , ['ain', undef, ['Ainu']]
+  , ['aka', ['ak'],['Akan']]
+  , ['akk', undef, ['Akkadian']]
+  , ['alb', ['sq'],['Albanian']]
+  , ['ale', undef, ['Aleut']]
+  , ['alg', undef, ['Algonquian']]
+  , ['alt', undef, ['Southern Altai']]
+  , ['amh', ['am'],['Amharic']]
+  , ['ang', undef, ['Old English']]
+  , ['anp', undef, ['Angika']]
+  , ['apa', undef, ['Apache']]
+  , ['ara', ['ar'],['Arabic']]
+  , ['arc', undef, ['Aramaic']]
+  , ['arg', ['an'],['Aragonese']]
+  , ['arm', ['hy'],['Armenian']]
+  , ['arn', undef, ['Araucanian']]
+  , ['arp', undef, ['Arapaho']]
+  , ['art', undef, ['Artificial']]
+  , ['arw', undef, ['Arawak']]
+  , ['asm', ['as'],['Assamese']]
+  , ['ast', undef, ['Asturian','Bable']]
+  , ['ath', undef, ['Athapascan']]
+  , ['aus', undef, ['Australian']]
+  , ['ava', ['av'],['Avaric']]
+  , ['ave', ['ae'],['Avestan']]
+  , ['awa', undef, ['Awadhi']]
+  , ['aym', ['ay'],['Aymara']]
+  , ['aze', ['az'],['Azerbaijani']]
+  , ['bad', undef, ['Banda']]
+  , ['bai', undef, ['Bamileke']]
+  , ['bak', ['ba'],['Bashkir']]
+  , ['bal', undef, ['Baluchi']]
+  , ['bam', ['bm'],['Bambara']]
+  , ['ban', undef, ['Balinese']]
+  , ['baq', ['eu'],['Basque']]
+  , ['bas', undef, ['Basa']]
+  , ['bat', undef, ['Baltic']]
+  , ['bej', undef, ['Beja']]
+  , ['bel', ['be'],['Belarusian']]
+  , ['bem', undef, ['Bemba']]
+  , ['ben', ['bn'],['Bengali']]
+  , ['ber', undef, ['Berber']]
+  , ['bho', undef, ['Bhojpuri']]
+  , ['bih', ['bh'],['Bihari']]
+  , ['bik', undef, ['Bikol']]
+  , ['bin', undef, ['Bini']]
+  , ['bis', ['bi'],['Bislama']]
+  , ['bla', undef, ['Siksika']]
+  , ['bnt', undef, ['Bantu']]
+  , ['bos', ['bs'],['Bosnian']]
+  , ['bra', undef, ['Braj']]
+  , ['bre', ['br'],['Breton']]
+  , ['btk', undef, ['Batak']]
+  , ['bua', undef, ['Buriat']]
+  , ['bug', undef, ['Buginese']]
+  , ['bul', ['bg'],['Bulgarian']]
+  , ['bur', ['my','Burmese']]
+  , ['byn', undef],[ ['Bilin','Blin']]
+  , ['cad', undef, ['Caddo']]
+  , ['cai', undef, ['Central American Indian']]
+  , ['car', undef, ['Carib']]
+  , ['cat', ['ca'],['Catalan']]
+  , ['cau', undef, ['Caucasian']]
+  , ['ceb', undef, ['Cebuano']]
+  , ['cel', undef, ['Celtic']]
+  , ['cha', ['ch'],['Chamorro']]
+  , ['chb', undef, ['Chibcha']]
+  , ['che', ['ce'],['Chechen']]
+  , ['chg', undef, ['Chagatai']]
+  , ['chi', ['zh'],['Chinese']]
+  , ['chk', undef, ['Chuukese']]
+  , ['chm', undef, ['Mari']]
+  , ['chn', undef, ['Chinook']]
+  , ['cho', undef, ['Choctaw']]
+  , ['chp', undef, ['Chipewyan']]
+  , ['chr', undef, ['Cherokee']]
+  , ['chu', ['cu'],['Church Slavic','Church Slavonic','Old Bulgarian'
+	    ,'Old Church Slavic','Old Church Slavonic'
+	    ,'Old Slavic','Old Slavonic'
+	    ]
+    ]
+  , ['chv', ['cv'],['Chuvash']]
+  , ['chy', undef, ['Cheyenne']]
+  , ['cmc', undef, ['Chamic']]
+  , ['cop', undef, ['Coptic']]
+  , ['cor', ['kw'],['Cornish']]
+  , ['cos', ['co'],['Corsican']]
+  , ['cpe', undef, ['English Creole','English Pidgin']]
+  , ['cpf', undef, ['French Creole','French Pidgin']]
+  , ['cpp', undef, ['Portuguese Creole','Portuguese Pidgin']]
+  , ['cre', ['cr'],['Cree']]
+  , ['crh', undef, ['Crimean Tatar','Crimean Turkish']]
+  , ['crp', undef, ['Creole','Pidgin']]
+  , ['csb', undef, ['Kashubian']]
+  , ['cus', undef, ['Cushitic']]
+  , ['cze', ['cs'],['Czech']]
+  , ['dak', undef, ['Dakota']]
+  , ['dan', ['da'],['Danish']]
+  , ['dar', undef, ['Dargwa']]
+  , ['day', undef, ['Dayak']]
+  , ['del', undef, ['Delaware']]
+  , ['den', undef, ['Slave']]
+  , ['dgr', undef, ['Dogrib']]
+  , ['din', undef, ['Dinka']]
+  , ['div', ['dv'],['Divehi']]
+  , ['doi', undef, ['Dogri']]
+  , ['dra', undef, ['Dravidian']]
+  , ['dsb', undef, ['Lower Sorbian']]
+  , ['dua', undef, ['Duala']]
+  , ['dum', undef, ['Middle Dutch']]
+  , ['dut', ['nl'],['Dutch','Flemish']]
+  , ['dyu', undef, ['Dyula']]
+  , ['dzo', ['dz'],['Dzongkha']]
+  , ['efi', undef, ['Efik']]
+  , ['egy', undef, ['Egyptian']]
+  , ['eka', undef, ['Ekajuk']]
+  , ['elx', undef, ['Elamite']]
+  , ['eng', ['en'],['English']]
+  , ['enm', undef, ['Middle English']]
+  , ['epo', ['eo'],['Esperanto']]
+  , ['est', ['et'],['Estonian']]
+  , ['ewe', ['ee'],['Ewe']]
+  , ['ewo', undef, ['Ewondo']]
+  , ['fan', undef, ['Fang']]
+  , ['fao', ['fo'],['Faroese']]
+  , ['fat', undef, ['Fanti']]
+  , ['fij', ['fj'],['Fijian']]
+  , ['fil', undef, ['Filipino','Pilipino']]
+  , ['fin', ['fi'],['Finnish']]
+  , ['fiu', undef, ['Finno-Ugrian']]
+  , ['fon', undef, ['Fon']]
+  , ['fre', ['fr'],['French']]
+  , ['frm', undef, ['Middle French']]
+  , ['fro', undef, ['Old French']]
+  , ['frr', undef, ['Northern Frisian']]
+  , ['frs', undef, ['Eastern Frisian']]
+  , ['fry', ['fy'],['Frisian']]
+  , ['ful', ['ff'],['Fulah']]
+  , ['fur', undef, ['Friulian']]
+  , ['gaa', ['ga'],['Ga']]
+  , ['gay', undef, ['Gayo']]
+  , ['gba', undef, ['Gbaya']]
+  , ['gem', undef, ['Germanic']]
+  , ['geo', ['ka'],['Georgian']]
+  , ['ger', ['de'],['German']]
+  , ['gez', undef, ['Geez']]
+  , ['gil', undef, ['Gilbertese']]
+  , ['gla', ['gd'],['Gaelic','Scottish Gaelic']]
+  , ['gle', ['ga'],['Irish']]
+  , ['glg', ['gl'],['Gallegan']]
+  , ['glv', ['gv'],['Manx']]
+  , ['gmh', undef, ['Middle High German']]
+  , ['goh', undef, ['Old High German']]
+  , ['gon', undef, ['Gondi']]
+  , ['gor', undef, ['Gorontalo']]
+  , ['got', undef, ['Gothic']]
+  , ['grb', undef, ['Grebo']]
+  , ['grc', undef, ['Ancient Greek']]
+  , ['gre', ['el'],['Greek']]
+  , ['grn', ['gn'],['Guarani']]
+  , ['gsw', undef, ['Alemannic','Alsatian','Swiss German']]
+  , ['guj', ['gu'],['Gujarati']]
+  , ['gwi', undef, ['GwichZin','GwichŽin']]
+  , ['hai', undef, ['Haida']]
+  , ['hat', undef, ['Haitian','Haitian Creole']]
+  , ['hau', ['ha'],['Hausa']]
+  , ['haw', undef, ['Hawaiian']]
+  , ['heb', ['he','iw'],['Hebrew']]
+  , ['her', ['hz'],['Herero']]
+  , ['hil', undef, ['Hiligaynon']]
+  , ['him', undef, ['Himachali']]
+  , ['hin', ['hi'],['Hindi']]
+  , ['hit', undef, ['Hittite']]
+  , ['hmn', undef, ['Hmong']]
+  , ['hmo', ['ho'],['Hiri Motu']]
+  , ['hsb', undef, ['Upper Sorbian']]
+  , ['hun', ['hu'],['Hungarian']]
+  , ['hup', undef, ['Hupa']]
+  , ['iba', undef, ['Iban']]
+  , ['ibo', ['ig'],['Igbo']]
+  , ['ice', ['is'],['Icelandic']]
+  , ['ido', ['io'],['Ido']]
+  , ['iii', ['ii'],['Sichuan Yi']]
+  , ['ijo', undef, ['Ijo']]
+  , ['iku', ['iu'],['Inuktitut']]
+  , ['ile', ['ie'],['Interlingue']]
+  , ['ilo', undef, ['Iloko']]
+  , ['ina', ['ia'],['Interlingua']]
+  , ['inc', undef, ['Indic']]
+  , ['ind', ['id'],['Indonesian']]
+  , ['ine', undef, ['Indo-European']]
+  , ['inh', undef, ['Ingush']]
+  , ['ipk', ['ik'],['Inupiaq']]
+  , ['ira', undef, ['Iranian']]
+  , ['iro', undef, ['Iroquoian']]
+  , ['ita', ['it'],['Italian']]
+  , ['jav', ['jv'],['Javanese']]
+  , ['jbo', undef, ['Lojban']]
+  , ['jpn', ['ja'],['Japanese']]
+  , ['jpr', undef, ['Judeo-Persian']]
+  , ['jrb', undef, ['Judeo-Arabic']]
+  , ['kaa', undef, ['Kara-Kalpak']]
+  , ['kab', undef, ['Kabyle']]
+  , ['kac', undef, ['Kachin']]
+  , ['kal', ['kl'],['Greenlandic','Kalaallisut']]
+  , ['kam', undef, ['Kamba']]
+  , ['kan', ['kn'],['Kannada']]
+  , ['kar', undef, ['Karen']]
+  , ['kas', ['ks'],['Kashmiri']]
+  , ['kau', ['kr'],['Kanuri']]
+  , ['kaw', undef, ['Kawi']]
+  , ['kaz', ['kk'],['Kazakh']]
+  , ['kbd', undef, ['Kabardian']]
+  , ['kha', undef, ['Khasi']]
+  , ['khi', undef, ['Khoisan']]
+  , ['khm', ['km'],['Khmer']]
+  , ['kho', undef, ['Khotanese']]
+  , ['kik', ['ki'],['Gikuyu','Kikuyu']]
+  , ['kin', ['rw'],['Kinyarwanda']]
+  , ['kir', ['ky'],['Kirghiz']]
+  , ['kmb', undef, ['Kimbundu']]
+  , ['kok', undef, ['Konkani']]
+  , ['kom', ['kv'],['Komi']]
+  , ['kon', ['kg'],['Kongo']]
+  , ['kor', ['ko'],['Korean']]
+  , ['kos', undef, ['Kosraean']]
+  , ['kpe', undef, ['Kpelle']]
+  , ['krc', undef, ['Karachay-Balkar']]
+  , ['krl', undef, ['Karelian']]
+  , ['kro', undef, ['Kru']]
+  , ['kru', undef, ['Kurukh']]
+  , ['kua', ['kj'],['Kuanyama','Kwanyama']]
+  , ['kum', undef, ['Kumyk']]
+  , ['kur', ['ku'],['Kurdish']]
+  , ['kut', undef, ['Kutenai']]
+  , ['lad', undef, ['Ladino']]
+  , ['lah', undef, ['Lahnda']]
+  , ['lam', undef, ['Lamba']]
+  , ['lao', ['lo'],['Lao']]
+  , ['lat', ['la'],['Latin']]
+  , ['lav', ['lv'],['Latvian']]
+  , ['lez', undef, ['Lezghian']]
+  , ['lim', ['li'],['Limburgan','Limburger','Limburgish']]
+  , ['lin', ['ln'],['Lingala']]
+  , ['lit', ['lt'],['Lithuanian']]
+  , ['lol', undef, ['Mongo']]
+  , ['loz', undef, ['Lozi']]
+  , ['ltz', ['lb'],['Letzeburgesch','Luxembourgish']]
+  , ['lua', undef, ['Luba-Lulua']]
+  , ['lub', ['lu'],['Luba-Katanga']]
+  , ['lug', ['lg'],['Ganda']]
+  , ['lui', undef, ['Luiseno']]
+  , ['lun', undef, ['Lunda']]
+  , ['luo', undef, ['Luo']]
+  , ['lus', undef, ['Lushai']]
+  , ['mac', ['mk'],['Macedonian']]
+  , ['mad', undef, ['Madurese']]
+  , ['mag', undef, ['Magahi']]
+  , ['mah', ['mh'],['Marshallese']]
+  , ['mai', undef, ['Maithili']]
+  , ['mak', undef, ['Makasar']]
+  , ['mal', ['ml'],['Malayalam']]
+  , ['man', undef, ['Mandingo']]
+  , ['mao', ['mi'],['Maori']]
+  , ['map', undef, ['Austronesian']]
+  , ['mar', ['mr'],['Marathi']]
+  , ['mas', undef, ['Masai']]
+  , ['may', ['ms'],['Malay']]
+  , ['mdf', undef, ['Moksha']]
+  , ['mdr', undef, ['Mandar']]
+  , ['men', undef, ['Mende']]
+  , ['mga', undef, ['Middle Irish']]
+  , ['mic', undef, ['Micmac']]
+  , ['min', undef, ['Minangkabau']]
+  , ['mis', undef, ['Misc', 'Miscellaneous']]
+  , ['mkh', undef, ['Mon-Khmer']]
+  , ['mlg', ['mg'],['Malagasy']]
+  , ['mlt', ['mt'],['Maltese']]
+  , ['mnc', undef, ['Manchu']]
+  , ['mni', undef, ['Manipuri']]
+  , ['mno', undef, ['Manobo']]
+  , ['moh', undef, ['Mohawk']]
+  , ['mol', ['mo'],['Moldavian']]
+  , ['mon', ['mn'],['Mongolian']]
+  , ['mos', undef, ['Mossi']]
+  , ['mul', undef, ['Multiple']]
+  , ['mun', undef, ['Munda']]
+  , ['mus', undef, ['Creek']]
+  , ['mwl', undef, ['Mirandese']]
+  , ['mwr', undef, ['Marwari']]
+  , ['myn', undef, ['Mayan']]
+  , ['myv', undef, ['Erzya']]
+  , ['nah', undef, ['Nahuatl']]
+  , ['nai', undef, ['North American Indian']]
+  , ['nap', undef, ['Neapolitan']]
+  , ['nau', ['na'],['Nauru']]
+  , ['nav', ['nv'],['Navaho','Navajo']]
+  , ['nbl', ['nr'],['South Ndebele']]
+  , ['nde', ['nd'],['North Ndebele']]
+  , ['ndo', ['ng'],['Ndonga']]
+  , ['nds', undef, ['Low German','Low Saxon']]
+  , ['nep', ['ne'],['Nepali']]
+  , ['new', undef, ['Newari']]
+  , ['nia', undef, ['Nias']]
+  , ['nic', undef, ['Niger-Kordofanian']]
+  , ['niu', undef, ['Niuean']]
+  , ['nno', ['nn'],['Norwegian Nynorsk']]
+  , ['nob', ['nb'],['Norwegian Bokmal','Norwegian Bokmål']]
+  , ['nog', undef, ['Nogai']]
+  , ['non', undef, ['Old Norse']]
+  , ['nor', ['no'],['Norwegian']]
+  , ['nqo', undef, ['N\'Ko']]
+  , ['nso', undef, ['Northern Sotho']]
+  , ['nub', undef, ['Nubian']]
+  , ['nwc', undef, ['Classical Nepal Bhasa','Classical Newari']]
+  , ['nya', ['ny'],['Chewa','Chichewa','Nyanja']]
+  , ['nym', undef, ['Nyamwezi']]
+  , ['nyn', undef, ['Nyankole']]
+  , ['nyo', undef, ['Nyoro']]
+  , ['nzi', undef, ['Nzima']]
+  , ['oci', ['oc'],['Occitan','Provencal','Provençal']]
+  , ['oji', ['oj'],['Ojibwa']]
+  , ['ori', ['or'],['Oriya']]
+  , ['orm', ['om'],['Oromo']]
+  , ['osa', undef, ['Osage']]
+  , ['oss', ['os'],['Ossetian','Ossetic']]
+  , ['ota', undef, ['Ottoman Turkish']]
+  , ['oto', undef, ['Otomian']]
+  , ['paa', undef, ['Papuan']]
+  , ['pag', undef, ['Pangasinan']]
+  , ['pal', undef, ['Pahlavi']]
+  , ['pam', undef, ['Pampanga']]
+  , ['pan', ['pa'],['Panjabi']]
+  , ['pap', undef, ['Papiamento']]
+  , ['pau', undef, ['Palauan']]
+  , ['peo', undef, ['Old Persian']]
+  , ['per', ['fa'],['Persian']]
+  , ['phi', undef, ['Philippine']]
+  , ['phn', undef, ['Phoenician']]
+  , ['pli', ['pi'],['Pali']]
+  , ['pol', ['pl'],['Polish']]
+  , ['pon', undef, ['Pohnpeian']]
+  , ['por', ['pt'],['Portuguese', 'Portugese']] # common misspelling
+  , ['pra', undef, ['Prakrit']]
+  , ['pro', undef, ['Old Provencal','Old Provençal']]
+  , ['pus', ['ps'],['Pushto']]
+  , ['que', ['qu'],['Quechua']]
+  , ['raj', undef, ['Rajasthani']]
+  , ['rap', undef, ['Rapanui']]
+  , ['rar', undef, ['Rarotongan']]
+  , ['roa', undef, ['Romance']]
+  , ['roh', ['rm'],['Raeto-Romance']]
+  , ['rom', undef, ['Romany']]
+  , ['rum', ['ro'],['Romanian']]
+  , ['run', ['rn'],['Rundi']]
+  , ['rup', undef, ['Aromanian','Arumanian','Macedo-Romanian']]
+  , ['rus', ['ru'],['Russian']]
+  , ['sad', undef, ['Sandawe']]
+  , ['sag', ['sg'],['Sango']]
+  , ['sah', undef, ['Yakut']]
+  , ['sai', undef, ['South American Indian']]
+  , ['sal', undef, ['Salishan']]
+  , ['sam', undef, ['Samaritan Aramaic']]
+  , ['san', ['sa'],['Sanskrit']]
+  , ['sas', undef, ['Sasak']]
+  , ['sat', undef, ['Santali']]
+  , ['scc', ['sr'],['Serbian']]
+  , ['scn', undef, ['Sicilian']]
+  , ['sco', undef, ['Scots']]
+  , ['scr', ['hr'],['Croatian','Hrvatske']]
+  , ['sel', undef, ['Selkup']]
+  , ['sem', undef, ['Semitic']]
+  , ['sga', undef, ['Old Irish']]
+  , ['sgn', undef, ['Sign']]
+  , ['shn', undef, ['Shan']]
+  , ['sid', undef, ['Sidamo']]
+  , ['sin', ['si'],['Sinhalese']]
+  , ['sio', undef, ['Siouan']]
+  , ['sit', undef, ['Sino-Tibetan']]
+  , ['sla', undef, ['Slavic']]
+  , ['slo', ['sk'],['Slovak']]
+  , ['slv', ['sl'],['Slovenian']]
+  , ['sma', undef, ['Southern Sami']]
+  , ['sme', ['se'],['Northern Sami']]
+  , ['smi', undef, ['Sami']]
+  , ['smj', undef, ['Lule Sami']]
+  , ['smn', undef, ['Inari Sami']]
+  , ['smo', ['sm'],['Samoan']]
+  , ['sms', undef, ['Skolt Sami']]
+  , ['sna', ['sn'],['Shona']]
+  , ['snd', ['sd'],['Sindhi']]
+  , ['snk', undef, ['Soninke']]
+  , ['sog', undef, ['Sogdian']]
+  , ['som', ['so'],['Somali']]
+  , ['son', undef, ['Songhai']]
+  , ['sot', ['st'],['Southern Sotho']]
+  , ['spa', ['es'],['Castilian','Spanish']]
+  , ['srd', ['sc'],['Sardinian']]
+  , ['srn', undef, ['Sranan Tongo']]
+  , ['srr', undef, ['Serer']]
+  , ['ssa', undef, ['Nilo-Saharan']]
+  , ['ssw', ['ss'],['Swati']]
+  , ['suk', undef, ['Sukuma']]
+  , ['sun', ['su'],['Sundanese']]
+  , ['sus', undef, ['Susu']]
+  , ['sux', undef, ['Sumerian']]
+  , ['swa', ['sw'],['Swahili']]
+  , ['swe', ['sv'],['Swedish']]
+  , ['syc', undef, ['Classical Syriac']]
+  , ['syr', undef, ['Syriac']]
+  , ['tah', ['ty'],['Tahitian']]
+  , ['tai', undef, ['Tai']]
+  , ['tam', ['ta'],['Tamil']]
+  , ['tat', ['tt'],['Tatar']]
+  , ['tel', ['te'],['Telugu']]
+  , ['tem', undef, ['Timne']]
+  , ['ter', undef, ['Tereno']]
+  , ['tet', undef, ['Tetum']]
+  , ['tgk', ['tg'],['Tajik']]
+  , ['tgl', ['tl'],['Tagalog']]
+  , ['tha', ['th'],['Thai']]
+  , ['tib', ['bo'],['Tibetan']]
+  , ['tig', undef, ['Tigre']]
+  , ['tir', ['ti'],['Tigrinya']]
+  , ['tiv', undef, ['Tiv']]
+  , ['tkl', undef, ['Tokelau']]
+  , ['tlh', undef, ['Klingon','tlhlngan-Hol']]
+  , ['tli', undef, ['Tlingit']]
+  , ['tmh', undef, ['Tamashek']]
+  , ['tog', undef, ['Nyasa']]
+  , ['ton', ['to'],['Tonga']]
+  , ['tpi', undef, ['Tok Pisin']]
+  , ['tsi', undef, ['Tsimshian']]
+  , ['tsn', ['tn'],['Tswana']]
+  , ['tso', ['ts'],['Tsonga']]
+  , ['tuk', ['tk'],['Turkmen']]
+  , ['tum', undef, ['Tumbuka']]
+  , ['tup', undef, ['Tupi']]
+  , ['tur', ['tr'],['Turkish']]
+  , ['tut', undef, ['Altaic']]
+  , ['tvl', undef, ['Tuvalu']]
+  , ['twi', ['tw'],['Twi']]
+  , ['tyv', undef, ['Tuvinian']]
+  , ['udm', undef, ['Udmurt']]
+  , ['uga', undef, ['Ugaritic']]
+  , ['uig', ['ug'],['Uighur']]
+  , ['ukr', ['uk'],['Ukrainian']]
+  , ['umb', undef, ['Umbundu']]
+  , ['und', undef, ['Undetermined','Unknown']]
+  , ['urd', ['ur'],['Urdu']]
+  , ['uzb', ['uz'],['Uzbek']]
+  , ['vai', undef, ['Vai']]
+  , ['ven', ['ve'],['Venda']]
+  , ['vie', ['vi'],['Vietnamese']]
+  , ['vol', ['vo'],['Volapuk','Volapük']]
+  , ['vot', undef, ['Votic']]
+  , ['wak', undef, ['Wakashan']]
+  , ['wal', undef, ['Walamo']]
+  , ['war', undef, ['Waray']]
+  , ['was', undef, ['Washo']]
+  , ['wel', ['cy'],['Welsh']]
+  , ['wen', undef, ['Sorbian']]
+  , ['wln', ['wa'],['Walloon']]
+  , ['wol', ['wo'],['Wolof']]
+  , ['xal', undef, ['Kalmyk','Oirat']]
+  , ['xho', ['xh'],['Xhosa']]
+  , ['yao', undef, ['Yao']]
+  , ['yap', undef, ['Yapese']]
+  , ['yid', ['yi'],['Yiddish']]
+  , ['yor', ['yo'],['Yoruba']]
+  , ['ypk', undef, ['Yupik']]
+  , ['zap', undef, ['Zapotec']]
+  , ['zbl', undef, ['Bliss','Blissymbolics','Blissymbols']]
+  , ['zen', undef, ['Zenaga']]
+  , ['zha', ['za'],['Chuang','Zhuang']]
+  , ['znd', undef, ['Zande']]
+  , ['zul', ['zu'],['Zulu']]
+  , ['zun', undef, ['Zuni']]
+  , ['zxx', undef, ['None']]
+  , ['zza', undef, ['Dimili','Dimli','Kirdki','Kirmanjki','Zaza','Zazaki']]
+  );
+
+# langhash maps known language names into cannonical
+# language codes. langcode holds all the codes.
+my %langhash;
+my %langcode;
+for my $entry (@langtable)
+  { my $k  = $$entry[0];
+    my $ac = $$entry[1];
+    my $al = $$entry[2];
+
+    # cannonical code is always legal
+    $langcode{lc($k)}=$k;
+
+    # add any code aliases
+    if( defined $ac )
+      { $langcode{lc($_)}=$k for @$ac; }
+
+    # record all the long names too
+    $langhash{lc($_)}=$k for @$al;
+  }
+
+my %show =
+  ( 'lang' => \&ShowLangs
+  );
+
+sub OptionShow
+  { my $str = $_[1];
+
+    if( exists $show{$str} )
+      {
+	push @{$cfg{show}}, $show{$str};
+      }
+    else
+      {
+	say STDERR "Unknown --show type: $str";
+	exit ERR_SHOW;
+      }
+  }
+
+sub ShowLangs
+  {
+    print "Recognized Languages and abbreviations:\n";
+    for my $ent (@langtable)
+      { print "$$ent[0], ".join(", ",@{$$ent[1]})."\n"; }
+  };
+
+#my $mimer = new File::MimeInfo::Magic;
+my $mimer = new File::MimeInfo;
+
+my %delval =
+  ( "\\"  => 11
+  , '-'   => 10
+  , '_'   =>  9
+  , '.'   =>  8
+  , ' '   =>  7
+  , ' - ' =>  6
+  );
+
+my %tmp = map { $_ => 1 } split('', join('',keys %delval));
+my $delchrs = "\\".join("\\", sort keys %tmp);
+my $titlecase = new Lingua::EN::Titlecase;
+
+my @encodergroups = qw
+  /aaf infinite pfa runner turkiso tnan ViLD /;
+
+# WWE = World Wrestling Entertainment Channel
+# AWA = American Wrestling Affiliates (2008-)	or
+#       American Wrestling Association (1957-1991)
+my @producers = qw
+  /AWA BBC\d? CBC Channel.?4
+   Discovery(?:.Channel)? History(?:.Channel)?
+   National.Geographic Playboy WWE You.?Tube
+  /;
+
+# MMA		   = Mixed Martial Arts
+my @contentmarkers = qw
+  /Documentary MMA Music\sVideo Music Rape Sports Sample Video/;
+
+my @contentsubtypes = qw
+  /(?:hidden\s)?(?:spy\s)?cam fetish/;
+
+# I don't currently parse for these, as they may as well be show
+# names, considering how they are usually used to indicate league
+# games.
+#
+# EPL = English Premier League or just Premier League (in England)
+# WVR = World Victory Road - Japanese Martial Arts Organization.
+my @leagues = qw
+  /EPL NHL WVR/;
+
+my @videoencodings = qw
+  /divx h\.264 x264 xvid/;
+
+my @audioencodings = qw
+  /AAC AAC2\.0 AC3 MP3 PCM TrueHD/;
+
+my @audiochannels = qw
+  /DD5\.1 mono stereo TrueHD5\.1/;
+
+my @aspects = qw
+  /fs ws/;
+
+my @subtitles = qw
+  /multisub dub(?:bed)? sub(?:bed) unsub(?:bed)/;
+
+my @sources = qw
+  /analogcap
+   bd[59] bdr bdrip bdscr br(?:rip)? blu-ray
+   cam(?:rip)? ddc dsr
+   dthrip dvb(?:rip)? dvdr dvd-full dvd-rip dvdrip
+   dvdscr dvdscreener festival hdtv limited
+   pdtv pdvd ppvrip pre-dvd r5 scr screener spycam stv
+   tc telecine ts tv(?:rip)? telesync
+   web(?:-dl)? web-?rip workprint wp
+  /;
+
+my @sourceratings = qw
+  /adult K12 PG R unrated XXX Porn/;
+
+# DC = Director's Cut
+# SE = Special Edition (usually a bare-bones DVD)
+my @sourceeditions = qw
+  /DC extended remastered SE theatrical uncut/;
+
+my @sourcerelease = qw
+  /(?:(?:really.)*real.)?proper recode repacked repackpost rerip/;
+
+# Not sure what v5 means...
+my @dispositions = qw
+  /internal v5/;
+
+my @distsites = qw
+  / CP (www.)?mvgroup.org thebox TTS/;
+
+my @scenegroups = qw
+  / 0tv 187HD 2hd 433 aAF aBD andyx ANGELiC AVCHD
+    BAJSKORV BARGE BFF BiA BRD
+    C4TV CiNEFiLE council CRiMSON CTU
+    d_s DEPRAViTY DIMENSION diverge driveway
+    EbP err0001 ekolb
+    FAMiLYGuY fever ffndvd FoV FQM ftp futv
+    gnarly GoTV GORE GRIFFIN
+    HAGGiS hannibal iLM Kata KYR lbp LOGiES loki LOL LP NoTV
+    medieval MELiTE midieval MiXED MOMENTUM MOViERUSH
+    NATV NFHD NODLABS OMiCRON ORENJI phase POD pm4 p0w4
+    QCF QSSDivX RCDiVX Reb RiVER
+    SAiNTS SAPHiRE SChiZO SEMTEX SiNNERS SFM sHoTV sTr Sti
+    SURFER TASTETV TDP TE TERRA TOPAZ TrollHD vodo
+    W4F walmart WASABi wat WEB WnA wunseedee xor XTV
+  /;
+
+my $re_contentmarkers = qr/(?|@{[join "|",@contentmarkers]})/i;
+my $re_contentsubtypes= qr/(?|@{[join "|",@contentsubtypes]})/i;
+my $re_encodergroups  = qr/(?|@{[join "|",@encodergroups]})/i;
+my $re_producers      = qr/(?|@{[join "|",@producers]})/i;
+my $re_aspects	      = qr/(?|@{[join "|",@aspects]})/i;
+my $re_videoencodings = qr/(?|@{[join "|",@videoencodings]})/i;
+my $re_audioencodings = qr/(?|@{[join "|",@audioencodings]})/i;
+my $re_audiochannels  = qr/(?|@{[join "|",@audiochannels]})/i;
+my $re_subtitles      = qr/(?|@{[join "|",@subtitles]})/i;
+my $re_sources	      = qr/(?|@{[join "|",@sources]})/i;
+my $re_sourceratings  = qr/(?|@{[join "|",@sourceratings]})/i;
+my $re_sourceeditions = qr/(?|@{[join "|",@sourceeditions]})/i;
+my $re_sourcerelease  = qr/(?|@{[join "|",@sourcerelease]})/i;
+my $re_dispositions   = qr/(?|@{[join "|",@dispositions]})/i;
+my $re_distsites      = qr/(?|@{[join "|",@distsites]})/i;
+my $re_scenegroups    = qr/(?|@{[join "|",@scenegroups]})/i;
+
+
+# takes a string and titlecases it.
+sub mktitle
+  { my $txt = shift;
+
+    # mostly gets it right.
+    $txt = $titlecase->title($txt);
+
+    # Capitalize after the m-dash '–' (\x{2013})
+    $txt =~ s/(\x{2013}\s*)(\w)/$1\U$2\E/;
+
+    # Capitalize the first word in quotes
+    $txt =~ s/(\s")(\w)/$1\U$2\E/;
+
+    # Handle 'The, An, A'
+    # Note that this requires one to know what we're making
+    # a title out of, since we want to do this for shownames,
+    # but not for episode names.
+#    $txt =~ s/^(The|An|A)\s+(.*?\S)(\s+[\x{2013}-]|$)/$2, $1$3/;
+
+    # In any case, if there is a terminal The, An, or A we want it
+    # capitalized.
+    $txt =~ s/\s(the|an|a)$/ \u$1/;
+    return $txt;
+  }
+
+# breakpar breaks a string into pieces delimited by balanced
+# parentheses and brackets, and returns the pieces.
+sub breakpar
+  { my $str = shift;
+    my $arg = shift;
+
+#    print "breakpar($str)\n" if $cfg{debug};
+
+    my @parts = extract_multiple
+      ( $str
+      , [ sub {extract_bracketed($_[0],"[](){}<>");} ]
+      );
+    my $ret = 0+($#parts > 0);
+    return ($ret,@parts);
+  }
+
+
+# breaks a name into pieces, by looking for glaringly obvious
+# season delimeters. Any season/episode info found is saved in hash
+# ref which is the second argument. Returns the pieces left after
+# removal of the season info.
+sub breakseason
+  { my ($str,$arg) = @_;
+    my $ret	   = 0;
+    my @parts;
+
+#   print "breakseason($str)\n" if $cfg{debug};
+
+    # Check for a standard Season/Episode descriptor, maybe in parens
+    if
+      ( $str =~ m
+	/ ^
+	  (.*?) [$delchrs]*
+	  \(? [sS](\d{1,3})[eE\$](\d{1,3}) \)?
+	  [$delchrs]*(.*)
+	  $
+        /x
+      )
+      {
+	$ret = 1;
+	push @parts, $1,$4;
+	$$arg{season}  = $2 unless exists $$arg{season};
+	$$arg{episode} = $3 unless exists $$arg{episode};
+	push @{$$arg{parse}}, ['breakseason','stdpar',$1,$2,$3,$4];
+      }
+    # Check for an alternate Season/Episode descriptor
+    elsif($str =~ m/^(.*?)[$delchrs]*(\d{1,2})x(\d{1,2})[$delchrs]*(.*)$/)
+      {
+	$ret = 1;
+	push @parts, $1,$4;
+	$$arg{season}  = $2 unless exists $$arg{season};
+	$$arg{episode} = $3 unless exists $$arg{episode};
+	push @{$$arg{parse}}, ['breakseason','alt',$1,$2,$3,$4];
+      }
+    # Check for a somewhat hazier alternate Season/Episode descriptor
+    elsif($str =~ m/^(.*?)[$delchrs]+(\d{1,3})x(\d{1,3})[$delchrs]+(.*)$/)
+      {
+	$ret = 1;
+	push @parts, $1,$4;
+	$$arg{season}  = $2 unless exists $$arg{season};
+	$$arg{episode} = $3 unless exists $$arg{episode};
+	push @{$$arg{parse}}, ['breakseason','hazalt',$1,$2,$3,$4];
+      }
+    # Check for a multi-episode one-shot descriptor (with limit)
+    elsif($str =~ m/^(.*?)[$delchrs]+(\d+)\s*of\s*(\d+)[$delchrs]+(.*)$/)
+      {
+	$ret = 1;
+	push @parts, $1,$4;
+	$$arg{season}   = -1 unless exists $$arg{season};
+	$$arg{episode}  = $2 unless exists $$arg{episode};
+	$$arg{episodes} = $3 unless exists $$arg{episodes};
+	push @{$$arg{parse}}, ['breakseason','multlim',$1,$2,$3,$4];
+      }
+    # Check for just an episode indicator
+    elsif
+      ( $str =~ m
+	  /^ (.*?)
+	     [$delchrs]+ep(?:isode)?[\s$delchrs]*#?(\d+)[$delchrs]+
+	     (.*)$
+	  /x
+      )
+      {
+	$ret = 1;
+	push @parts, $1,$3;
+	$$arg{season}   = -1 unless exists $$arg{season};
+	$$arg{episode}  = $2 unless exists $$arg{episode};
+	push @{$$arg{parse}}, ['breakseason','ep',$1,$2,$3];
+      }
+    elsif
+      ( $str =~ m
+	  /^ (.*?)[$delchrs]+
+	     ((?:19|20)\d\d)[$delchrs]?(\d\d)[$delchrs]?(\d\d)
+	     [$delchrs]+(.*)$
+	  /x
+      )
+      {
+	$ret	     = 1;
+	push @parts, $1, $5;
+	$$arg{year}  = $2;
+	$$arg{month} = $3;
+	$$arg{day}   = $4;
+	$$arg{date}  = "$2-$3-$4"; # Should be a Date object.
+
+	push @{$$arg{parse}}, ['breakseason','date',$1,$2,$3,$4,$5];
+      }
+
+    # No breakpoints found, return our one piece.
+    else
+      { push @parts, $str; }
+
+    # return a list of non-empty strings;
+    return ($ret,grep {$_} @parts);
+  }
+
+# Scans a string for subtle patterns that might (or might not) mark a
+# season. Only called if other more robust patterns have failed to
+# match. Returns a list consisting of a success code, and any
+# remaining parts, if a pattern was found.
+sub breakmaybeseason
+  { my ($str,$arg) = @_;
+    my @parts;
+    my $ret = 0;
+
+#   print "breakmaybeseason($str)\n" if $cfg{debug};
+
+    # Check for a multi-episode one-shot descriptor (without limit)
+    if( $str =~ m/^(.*?)[$delchrs]+(\d\d?)[$delchrs]+(.*)$/)
+      { $ret = 1;
+	push @parts, $1,$3;
+	$$arg{season}  = -1 unless exists $$arg{season};
+	$$arg{episode} = $2 unless exists $$arg{episode};
+      }
+    # Check for a 3-digit season+episode number
+    elsif( $str =~ m/^(.*?)[$delchrs]+(\d)(\d\d)[$delchrs]+(.*)$/)
+      { $ret = 1;
+	push @parts, $1,$4;
+	$$arg{season}  = $2 unless exists $$arg{season};
+	$$arg{episode} = $3 unless exists $$arg{episode};
+      }
+    # Check for a year and possible index
+    elsif
+      ( $str =~ m
+	/ ^(.*?)[$delchrs]+
+	  ((?:19|20)\d\d)(-\d\d\d?)?
+	  [$delchrs]+(.*)$
+	/x
+      )
+      { $ret	     =	1;
+	push @parts, $1,$4;
+	$$arg{year}   =	$2 unless exists $$arg{year};
+	$$arg{number} = $3 if defined $3 && ! exists $$arg{episode};
+      }
+    else
+      { push @parts, $str; }
+
+    return ($ret, grep {$_} @parts);
+  }
+
+# breaks a name into pieces, by looking for glaringly obvious
+# delimeters, like season/episode number patterns. If the delimeter
+# holds information (like said season/episode patterns) then that
+# information is saved in the second argument. Returns the pieces
+# left after the break.
+sub breakname
+  { my ($str,$arg) = @_;
+
+    my ($ret,@parts) = breakseason($str,$arg);
+#   dd($ret,\@parts) if $cfg{debug};
+
+    # Further break the last piece
+    # provided we aren't breaking the first piece after a successful
+    # break.
+    if( !$ret || @parts > 1)
+      { my $tail = pop @parts;
+	my ($err,@brk) = breakpar($tail,$arg);
+
+	push @parts, @brk;
+	$ret |= $err;
+      }
+
+    ($ret,@parts) = breakmaybeseason($parts[0],$arg) unless $ret;
+
+    # trim leading/trailing delimeters and return non-empty pieces
+    @parts = grep {$_} map { nodelim($_) } @parts;
+
+#   dd(\@parts) if $cfg{debug};
+    return @parts;
+  }
+
+sub nodelim
+  { my $str = shift;
+
+    # Consume any leading delimeters
+    $str =~ s/^[$delchrs]+//;
+
+    # Consume any trailing delimeters
+    $str =~ s/[$delchrs]+$//;
+
+    return $str;
+  }
+
+# pulls tags off the front of a string.
+#
+sub stripfront
+  { my ($str,$arg) = @_;
+    my $left	   = length($str);
+    my $len;
+
+    # keep going till we don't find anything
+    do
+      {
+	$len = $left;
+	# Consume any leading delimeters
+	$str =~ s/^[$delchrs]+//;
+
+	# Consume any content markers
+	if( $str =~ s/^($re_contentmarkers)\b// )
+	  { push @{$$arg{'content-markers'}}, $1; }
+
+	# Consume any ratings markers
+	if( $str =~ s/^($re_sourceratings)\b// )
+	  { $$arg{rating} = $1; }
+
+	# Consume any content subtypes
+	if( $str =~ s/^($re_contentsubtypes)\b// )
+	  { push @{$$arg{contentsubtypes}}, $1; }
+
+	# Consume any leading bracketed stuff
+	if( my $brk = extract_bracketed($str) )
+	  { push @{$$arg{contentinfo}}, substr($brk,1,-1); }
+
+	# Consume an encoder group name
+	if( $str =~ s/^($re_encodergroups)\b// )
+	  { $$arg{'encoder-group'} =  $1; }
+
+	# Consume a producer name
+	if( $str =~ s/^($re_producers)\b// )
+	  { $$arg{producer} =  $1; }
+
+	# If we (somehow) know the show and season, then the
+	# leading number is an episode.
+	if( exists $$arg{showname} && exists $$arg{season} )
+	  {
+	    if( $str	       =~ s/^(\d\d?)(?=\D)// )
+	      { $$arg{episode} =  $1; }
+	  }
+
+	$left = length($str);
+      }
+    until($left == $len);
+    return $str;
+  }
+
+# does the same thing as extract_bracketed, but from the end of the
+# string, not from the beginning. Note that we modify our input parameter.
+sub trailing_balanced
+  {
+    # Reverse string, and flip brackets.
+    $_[0] = reverse $_[0];
+    $_[0] =~ tr/[](){}<>/][)(}{></;
+
+    my $ret = extract_bracketed($_[0],'[]{}()<>');
+
+    # Reverse and flip again
+    $_[0] =  reverse $_[0];
+    $_[0] =~ tr/[](){}<>/][)(}{></;
+
+    # and to the results, if necessary
+    if( defined $ret )
+      {
+	$ret =  substr $ret,1,-1;
+	$ret =	reverse $ret;
+	$ret =~ tr/[](){}<>/][)(}{></;
+      }
+    return $ret;
+  }
+
+
+# pulls tags off the back of a string.
+sub stripback
+  { my ($str,$arg) = @_;
+    my $left	   = length($str);
+    my $len;
+
+    # keep going till we don't find anything
+    do
+      {
+	$len = $left;
+	# Consume any trailing delimeters
+	$str =~ s/[$delchrs]+$//;
+
+	# Consume (recursively) any bracketed subtexts
+	if( my $bal = trailing_balanced($str) )
+	  { my $hash =
+	      { _lvl => exists $$arg{level} ? $$arg{_lvl}+1 : 1 };
+	    my $subt = stripback($bal,$hash);
+
+	    push @{$$arg{'subtext-orig'}}, $bal;
+	    push @{$$arg{subtext}}, [$subt,$hash];
+	    if
+	      (  exists $$hash{language}{default}
+	      && !exists $$arg{language}{default}
+	      )
+	      { $$arg{language}{default} = $$hash{language}{default} };
+	  }
+
+	# Consume a scene group name
+	if( $str =~ s/\b($re_scenegroups)$// )
+	  { $$arg{'scene-group'} =  $1; }
+
+	# Consume a distribution site name
+	if( $str =~ s/\b($re_distsites)$// )
+	  { $$arg{'dist-site'} = $1; }
+
+	# Consume a dispostion tag
+	if( $str =~ s/\b($re_dispositions)$// )
+	  { $$arg{disposition} = $1; }
+
+	# Consume an edition tag
+	if( $str =~ s/\b($re_sourceeditions)$// )
+	  { $$arg{edition} = $1; }
+
+	# Consume a frame rate
+	if( $str =~ s/\b(\d+fp?s)$//i )
+	  { $$arg{'framerate'} = $1; }
+
+	# Consume a video data rate
+	if( $str =~ s/\b(\d+kbp?s)$//i )
+	  { $$arg{'videorate'} = $1; }
+
+	# Consume a video encoding spec
+	if( $str =~ s/(?<=[\W_])($re_videoencodings)$// )
+	  { $$arg{'video-encoding'} = $1; }
+
+	# Consume an audio channel spec
+	# This sometimes includes the encoding name, so
+	# we've put it before the audioencodings
+	if( $str =~ s/\b($re_audiochannels)$// )
+	  { $$arg{'audio-channels'} = $1; }
+
+	# Consume an audio data rate
+	if( $str =~ s/\b(\d+)$re_audioencodings$// )
+	  { $$arg{'audiorate'} = $1; }
+
+	# Consume an audio encoding spec
+	if( $str =~ s/\b($re_audioencodings)$// )
+	  { $$arg{'audio-encoding'} = $1; }
+
+	# Consume a subtitle spec
+	if( $str =~ s/\b($re_subtitles)$// )
+	  { $$arg{subtitles} = $1; }
+
+	# Consume an encoding source spec
+	if( $str =~ s/\b($re_sources)$// )
+	  { $$arg{'encoding-source'} = $1; }
+
+	# Consume encoding source extra data
+	if( $str =~ s/\b($re_sourcerelease)$// )
+	  { $$arg{'source-release'} = $1; }
+
+	# Consume an aspect ratio
+	if( $str =~ s/\b($re_aspects)$// )
+	  { $$arg{aspect}=$1; }
+
+	# Consume a video resolution
+	if( $str =~ s/(?!<\d)(\d\d\d+)x(\d\d\d+)$// )
+	  {
+	    $$arg{'video-width'}  = $1;
+	    $$arg{'video-height'} = $2;
+	  }
+
+	# Consume a release date
+	if( $str =~ s/(?<!\d)((?:19|20)\d\d)(?!\d)$// )
+	  { $$arg{year} = $1; }
+
+	# Consume a video format
+	# Note that we want this after all other number recognizers
+	if( $str =~ s/(?!<\d)(\d\d\d+)([ip])?$//i )
+	  {
+	    $$arg{'video-format'} = "$1$2";
+	    if( defined $2 )
+	      {
+		$$arg{'video-mode'}
+		  = (lc($2) eq 'i')? 'interlaced' : 'progressive';
+	      }
+	  }
+
+	# Consume a language name
+	for my $lang (keys %langhash)
+	  {
+	    if( $str =~ s/\b$lang(?:cc)?$//i )
+	      {
+		$$arg{language}{default} = $langhash{$lang}
+		  unless exists $$arg{language};
+	      }
+	  }
+
+	# Consume a language code, if we're inside parens
+	if( exists $$arg{_lvl} )
+	  {
+	    for my $lang (keys %langcode)
+	      {
+		if( $str =~ s/\b$lang(?:cc)?$//i )
+		  {
+		    $$arg{language}{default} = $langcode{$lang}
+		      unless exists $$arg{language};
+		  }
+	      }
+	  }
+
+	$left = length($str);
+      }
+    until($left == $len);
+    return $str;
+  }
+
+# Parse a name into components. This routine is inteded to perform a
+# 'smart' interpretation of a file name, pulling out such things as
+# markings for genre, year, codecs, resolution and scene tags.
+#
+# Right now its pretty simple.
+#
+# New plan:
+#
+# 1) Strip the front and back parts of the string with stripfront and
+#    stripback, just like before.
+# 2) Break the string into pieces, but any sub-pieces built
+#    are made by replacing scalars with array-refs, so they nest.
+# 3) Handle strings surrounded by balanced parens.
+
+# ... or not.
+
+
+sub parsename
+  { my $arg = shift;
+    my $str = $$arg{name};
+
+    # Strip tags off the back of the string, storing them in $arg
+    # we do the back first because we want it to have precedence
+    # in ambiguous and degenerate cases.
+    $str = stripback($str,$arg);
+
+    # Whatever we have now, is our stem
+    $$arg{stem} = $str unless exists $$arg{stem};
+
+    # Strip tags off the front of the part, storing them in $arg
+    $str = stripfront($str,$arg);
+
+    # Try to break the name into obvious parts,
+    # storing found info in $arg as appropriate
+    my @parts = breakname($str,$arg);
+
+    # convert any lingering dots or underscores to spaces
+    s/[_.\\]/ /g for @parts;
+
+    my $i = 0;
+    if( ! exists $$arg{showname} && exists $parts[$i] )
+      {	$$arg{showname} = mktitle($parts[$i++]); }
+    if( ! exists $$arg{episodename} && exists $parts[$i] )
+      { $$arg{episodename} = mktitle($parts[$i++]); }
+  }
+
+# buildname is the synthetic analog of the analytic parsename. This
+# function takes the output from parsename and tries to deduce new
+# structures and relationships we'd want to know about.
+#
+sub buildname
+  { my $arg = shift;
+
+    # choose a 'title' for this object, if we don't have one.
+    if( exists $$arg{title} )
+      {
+	$$arg{episodename} = $$arg{title}
+	  unless exists $cfg{assume}{episodename};
+      }
+    elsif( exists $$arg{episodename} )
+      { $$arg{title} = $$arg{episodename}; }
+    elsif( exists $$arg{showname} && ! exists $$arg{season} )
+      { $$arg{title} = $$arg{showname}; }
+    #else give up, and don't have a title.
+
+    # choose an output name.
+    my @outname;
+
+    # emit any ratings markers
+    push @outname, $$arg{rating}
+      if exists $$arg{rating};
+
+    # emit any content markers
+    push @outname, @{$$arg{'content-markers'}}
+      if exists $$arg{'content-markers'};
+
+    push @outname, $$arg{showname};
+
+    # Provide Year-Number for things that are labeled that way.
+    if( exists $$arg{year} )
+      { my $out = $$arg{year};
+
+	$out .= "-$$arg{number}" if exists $$arg{number};
+	push @outname, $out;
+      }
+
+    # Figure out if there's season/episode info or not.
+    if( exists $$arg{season} )
+      { my $ew = $$arg{episodedigits} // 2; # default episode field width
+	my $sw = $$arg{seasondigits}  // 2; # default season field width
+
+	if( $$arg{season} < 0 )
+	  {
+	    if( exists $$arg{episode} )
+	      { my $epn = $$arg{episode};
+
+		if( exists $$arg{episodes} )
+		  { my $eps = $$arg{episodes};
+
+		    $ew = length($eps);
+		    $$arg{showindex}
+		      = sprintf("%0${ew}s of %0${ew}s",$epn,$eps);
+		  }
+		else
+		  { $$arg{showindex} = sprintf("%0${ew}s", $epn); }
+	      }
+	  }
+	else
+	  { my $sn = $$arg{season};
+	    my $en = $$arg{episode} // 0;
+
+	    $sw = length($$arg{seasons}) if exists $$arg{seasons};
+	    $$arg{showindex} = sprintf("S%0${sw}sE%0${ew}s",$sn,$en);
+	  }
+	push @outname, $$arg{showindex};
+      }
+    push( @outname, $$arg{episodename}) if exists $$arg{episodename};
+
+    $$arg{newname}     = join(" - ",@outname).".mkv";
+    if( $cfg{outdir} )
+      { $$arg{outname} = "$cfg{outdir}/$$arg{newname}"; }
+    else
+      { $$arg{outname} = $$arg{newname}; }
+  }
+
+# Takes a file name argument and tries to determine the type
+# of the file at that location
+sub filetype
+  { my $fn  = shift;
+    my $ret = "null/null";
+    my $fh  = new FileHandle($fn,"r");
+
+    $ret = $mimer->mimetype($fn) // $ret if $fh;
+    return MIME::Type->new(type => $ret);
+  }
+
+sub base_ext
+  { my $name = shift;
+    my ($base,undef,$ext) = fileparse($name,qr/\.[^.]*$/);
+
+    return ($base,$ext) if wantarray;
+    return $base;
+  }
+
+# Takes a (possibly empty) hashref of argument properties, and a file
+# name argument and parses the file name in various ways to determine
+# useful properties of the argument, which it stores in the hashref
+sub argprops
+  { my $arg = shift;
+
+    $$arg{pathname}		 = $$arg{arg};
+    $$arg{mimetype}		 = filetype($$arg{pathname});
+    @$arg{qw(vol path filename)} = File::Spec->splitpath($$arg{pathname});
+    @$arg{qw(base ext)}		 = base_ext($$arg{filename});
+
+    $$arg{name}	= $$arg{base} unless exists $$arg{name};
+
+  }
+
+#
+# run mkvmerge --identify or a similar program to determine the track
+# layout of the argument.
+#
+# Note that we're using capture and system rather than qx() to avoid
+# problems with strange metacharacters in file names.
+#
+
+sub mkvinfo
+  { my $arg = shift;
+    my $fil = $$arg{pathname};
+    stat($fil);
+
+    print "File \"$fil\" not found\n" and return 0 unless -e _;
+    print "File \"$fil\" can not be read\n" and return 0 unless -r _;
+    print "File \"$fil\" is zero size\n" and return 0 unless -s _;
+
+    my $lines = capture_merged
+      { system ( 'mkvmerge', '--identify', $fil ); };
+
+    # unset by system
+    binmode STDOUT, ':utf8';
+
+    if( $? == -1 )
+      { croak "couldn't run 'mkvmerge': $!"; }
+    elsif ($? & 127)
+      {
+	croak sprintf
+	  ( "(automkv) mkvmerge terminated by signal %d%2"
+	  , ($? & 127)
+	  , ($? & 128) ? ', with coredump' : ''
+	  );
+	exit($?);
+      }
+    elsif ($?)
+      { my $err = $? >> 8;
+
+	printf STDERR
+	  ( "Error %d: %s: %s"
+	  , $err
+	  , $lines
+	  , $$arg{arg}
+	  );
+	return 0;
+      }
+    my @trkdat= ($lines=~m/^Track ID (\d+):\s+(\w+)\s+\((.*)\)\s*$/mog);
+    print "No Tracks found\n" and return 0 unless @trkdat;
+    dd(\@trkdat) if $cfg{debug};
+    while( @trkdat )
+      { my ($ti,$tt,$tf) = splice @trkdat, 0, 3;
+
+	$$arg{'track'}{$ti} = { type => $tt, format => $tf };
+      }
+    return 1;
+  }
+
+sub filesetsort
+  {
+    return 0;
+  }
+#
+# run mkvmerge on the argument.
+#
+sub mkv
+  { my $arg = shift;
+    my @cmd;
+
+    die "No Output Name?" unless exists $$arg{outname};
+
+    push @cmd, 'mkvmerge';
+    push @cmd, ('--title', $$arg{title}) if exists $$arg{title};
+    push @cmd, ('--default-language', $cfg{'default-language'})
+      if exists $cfg{'default-language'};
+    push @cmd, ('-o', $$arg{outname} );
+
+    die "Nothing to do?" unless exists $$arg{fileset};
+    my @set = sort filesetsort @{$$arg{fileset}};
+    foreach my $f (@set)
+      {
+	next unless exists $$f{track};
+	for my $tn (keys %{$$f{track}})
+	  { my $t = $$f{track}{$tn};
+	    my $lang;
+
+	    next unless exists $$t{type};
+
+	    push @cmd, ('--track-name', "$tn:$cfg{'default-presentation'}");
+
+	    my $type = $$t{type};
+
+	    if( exists $$t{language} )
+	      { $lang  = $$t{language}; }
+	    elsif( exists $$f{language} )
+	      { my $fl = $$f{language};
+
+		if( exists $$fl{$type})
+		  { $lang = $$fl{$type}; }
+		elsif( exists $$fl{default} )
+		  { $lang = $$fl{default}; }
+	      };
+	    if( !defined $lang )
+	      {
+		if( exists $$arg{language} )
+		  { $lang = $$arg{language}; }
+		else
+		  { $lang = $cfg{'default-language'}; }
+	      }
+
+	    push @cmd, ('--language', "$tn:$lang" )
+	      if $lang ne $cfg{'default-language'};
+
+	    push @cmd, ('--default-track', "$tn:0" )
+	      if $type eq 'subtitles';
+	  }
+	push @cmd, $$f{filename};
+      }
+
+    dd($arg) if $cfg{debug};
+    if( $cfg{verbose} || $cfg{nop} )
+      { my $act = $cfg{nop} ? 'Action: ' : '';
+	my $qot = shell_quote_best_effort(@cmd);
+
+	binmode STDOUT, ':utf8';
+	print "$act$qot\n";
+      }
+    system @cmd unless $cfg{nop};
+  }
+
+sub longest_prefix_re
+  { "$_[0]=S=$_[1]" =~ /^(.*).*=S=\1.*$/;
+    return length($1);
+  };
+
+sub longest_prefix_xor
+  { my $s = $_[0] ^ $_[1];
+
+    $s =~ /^\000+/g and return pos($s);
+    return 0;
+  }
+
+# handle video files
+sub handler_video
+  { my ($arg,$dat) = @_;
+
+    print "Video: $$dat{filename}\n";
+
+    parsename($dat);		# take arg name apart, finding components.
+    mkvinfo($dat);		# probe the file for information.
+  }
+
+# handle files with a .sub/.idx extension
+sub handler_vobsub
+  { my ($arg,$dat) = @_;
+
+    print "Subtitle: $$dat{filename}, Lang: ";
+    parsename($dat);		# take arg name apart, finding components.
+    mkvinfo($dat);		# probe the file for information.
+    if( exists $$dat{language}{default} )
+      { print "$$dat{language}{default}\n"; }
+    else
+      { print "unknown!\n"; }
+  };
+
+# handle files with a .srt extension
+sub handler_subrip
+  { my ($arg,$dat) = @_;
+
+    print "Subtitle: $$dat{filename}, Lang: ";
+    parsename($dat);		# take arg name apart, finding components.
+    mkvinfo($dat);		# probe the file for information.
+    if( exists $$dat{language}{default} )
+      { print "$$dat{language}{default}\n"; }
+    else
+      { print "unknown!\n"; }
+  };
+
+my %typehandler =
+  ( matroska	=> \&handler_video
+  , msvideo	=> \&handler_video
+  , mpeg	=> \&handler_video
+  , mp4		=> \&handler_video
+  , subrip	=> \&handler_subrip
+  , ".idx"	=> \&handler_vobsub
+  );
+
+sub handlefile
+  { my ($arg,$dat) = @_;
+
+    if( exists $typehandler{$$dat{type}} )
+      { &{$typehandler{$$dat{type}}}($arg,$dat); }
+    else
+      {
+	print
+	  "Skipped: $$dat{filename}: No Handler for type \"$$dat{type}\"\n";
+      }
+  }
+
+# handle all files in the current fileset
+sub handlefiles
+  { my $arg = shift;
+    my $set = $$arg{fileset};
+
+    handlefile($arg,$_) for @$set;
+  }
+
+
+# try to produce a typename for a file
+sub typecalc
+  { my $f = shift;
+    my $m = $$f{mimetype};
+    my $e = $$f{ext};
+
+    return 'null' if( $m eq 'null/null' );
+    return $m->subType if( $m->mediaType eq 'application');
+    return $m->subType if( $m->mediaType eq 'video');
+    return $e if( $m->mediaType eq 'text');
+    return $m->type;
+  }
+
+# Look for files to involve in this operation.
+sub findall
+  { my $arg = shift;
+    my $dir = File::Spec->catpath($$arg{vol},$$arg{path},".");
+
+    print("Dir: $dir\n") if $cfg{debug};
+    opendir(my $dh, $dir);
+    my @files = map { decode_utf8($_) } readdir($dh);
+    closedir $dh;
+
+#    dd($arg,\@files);
+    # find all files with our stem prefix, except '.' and '..'
+    @files = grep { m/^\Q$$arg{stem}\E/i && !m|^\.\.?$|} @files;
+
+    my @fileset;
+    for my $f (@files)
+      { my $pathname = File::Spec->catpath($$arg{vol},$$arg{path},$f);
+	my $abs	 = abs_path($pathname);
+
+	if( ! exists $$jobs{handled}{$abs} )
+	  { my ($base,$ext) = base_ext($f);
+	    my $pfx	    = longest_prefix_xor($$arg{base},$base);
+
+	    my $dat	 =
+	      { filename => $f
+	      , pathname => $pathname
+	      , base     => $base
+	      , name     => $base
+	      , ext	 => $ext
+	      , path     => $$arg{path}
+	      , vol      => $$arg{vol}
+	      , abs	 => $abs
+	      , tail     => substr($base,$pfx)
+	      , mimetype => filetype($pathname)
+	      };
+	    $$dat{type} = typecalc($dat);
+
+	    %$dat = (%$dat, %{$cfg{assume}}) if exists $cfg{assume};
+
+	    $$jobs{handled}{$abs} = $dat;
+	    push @fileset, $dat;
+	  }
+      }
+    $$arg{fileset}=\@fileset if @fileset;
+  };
+
+#
+# This is the 'main' function of this program. It takes a filename
+# and figures out what to do with it based on the options currently in
+# effect for that argument.
+#
+sub HandleArg
+  { my $inp = shift;		# input arg name;
+    my $arg;			# properties of this arg
+
+    $inp .= ''; #stringify it.
+
+    # were we asked to make assumptions?
+    %$arg = %{$cfg{assume}} if exists $cfg{assume};
+
+    my $abs = abs_path($inp);
+
+    # make sure default language is in canonical form.
+    my $lang = lc($cfg{'default-language'});
+    if( exists $langhash{$lang} )
+      { $cfg{'default-language'} = $langhash{$lang}; }
+    elsif( exists $langcode{$lang})
+      { $cfg{'default-language'} = $langcode{$lang}; }
+    else
+      { my $msg
+	  = "Language \"$lang\" is unknown.\n"
+	  . "Use \"--show lang\" to get a list of all recognized languages.\n";
+
+	die $msg;
+      }
+
+    $$arg{arg} = $inp; # raw argument;
+    $$arg{abs} = $abs;
+    $$arg{cfg} = { %cfg }; # capture current config state;
+
+    push @{$$jobs{args}}, $arg;
+  }
+
+#
+# This is the 'main' function of this program. It takes a file descriptor
+# and figures out what to do with it based on the options currently in
+# effect for that argument.
+#
+sub HandleJob
+  { my $job = shift;
+
+    %cfg = %{$$job{cfg}};	# Restore saved config state.
+
+    print "\nInput: $$job{arg}\n" if $cfg{nop} || $cfg{debug};
+
+    argprops($job);		# convert arg to hash ref of its properties.
+    parsename($job);		# take arg name apart, finding components.
+    buildname($job);		# decide things, based on the parts.
+    findall($job);		# find all the files we want to include.
+
+    if( exists $$job{fileset} )
+      {
+	handlefiles($job);	# deal with various file types we've found.
+	mkv($job);		# Output the final results of this job.
+      }
+    else
+      { print "Nothing to do for $$job{arg}. Skipping.\n"; }
+  }
+
+@ARGV = map {decode_utf8($_)} @ARGV;
+my $ret = $cli->getoptions( \%cfg, @opts );
+
+if( exists $cfg{show} )
+  {
+    &$_ for @{$cfg{show}};
+    exit 0;
+  }
+
+if(!exists $$jobs{args})
+  {
+    print "automkv requires at least one argument.\n";
+    ConfigUsage(0);
+  }
+
+HandleJob($_) for @{$$jobs{args}};
+
+__END__
+
+=encoding utf8
+
+=head1 NAME
+
+automkv - Automatic MKV converter, with (we hope) smart behavior
+
+=head1 SYNOPSIS
+
+automkv [I<global-options>] [ [file-options ...] [file ...] ... ]
+
+  Global Information Options:
+    -? | --help                    Display brief help message and exit.
+    -S | --show                    Display specified information and exit.
+    -M | --man                     Print the manual page and exit.
+    -R | --readme		   Print the README for the program, and exit.
+    -V | --version                 Print the version information and exit.
+
+  Global Processing Options:
+    -n | --no-operation | --nop    Report what would be done, but don't do it.
+    -v | --verbose                 Report on what's being done.
+    -A | --assume		   Assume some data about the files.
+    -D | --debug                   Provide debug output.
+    -L | --default-language        Default language for all streams.
+    -O | --outdir                  Set path to output directory.
+    -P | --default-presentation    Default name for all grouped content.
+
+=head1 DESCRIPTION
+
+B<automkv> is currently in alpha state and, as such, may not be
+suitable for any particular use. In fact due to how far it yet has to
+go before meeting its minimal design specs, if it IS currently
+suitable for some task, it is unlikely to remain that way as it evolves.
+
+B<automkv> attempts to intelligently determine how to convert one ( or
+more) files into a .mkv file, incorporating all available metadata as
+it does so. So far, its still pretty dumb, fails to actually include
+much of the metadata is manages to deduce.
+
+B<automkv> is intended to be able to look at a set of media files in a
+directory tree, probe their contents, and (perhaps using additional
+information provided on the command line) deduce the relationships (if
+any) between the files, and gather all relevant metadata about the
+related files.
+
+Once all the metadata for a file or set of related files has been
+gathered, then automkv is supposed to work out which files can
+usefully be combined, and in which ways, and carry that out, such as
+merging subtitle or commentary files with their .avi file, or joining
+together two halves of a long movie into a single file, all controlled
+by a user policy that also dictates the final output file names of the
+newly created .mkv files.
+
+It is hoped that automkv will eventually be sophisticated enough to
+be allowed to run as a directory monitor, automatically converting all
+files that are stored in the monitored directories. That day is
+currently still a long way off.
+
+In practice, it is currently often necessary to assist automkv by
+giving it assumptions on the command line, such as what to assume the
+episode name of a tv series is. How it makes use of this extra data is
+both under-documented and undergoing rapid flux at the moment. I fear
+that this documentation is likely to always lag behind the reality
+until version 1.0 comes out.
+
+=head1 OPTIONS
+
+=head2 GLOBAL INFORMATIONAL OPTIONS
+
+=over 8
+
+=item B<-?> | B<--help>
+
+Prints a brief help message, and exits.
+
+=item B<-S> | B<--show> STR
+
+Prints the requested information, then exits. This option can be
+invoked multiple times to request multiple types of information, or a
+single comma-separated string can be passed to specify the desired
+information types. Currently allowed queries are:
+
+=over 8
+
+=item B<lang>
+
+List all accepted language codes.
+
+=item B<tags>
+
+Lists all tags accepted by the --assume option. At least, this is the
+theory. Currently all possible tags are accepted, and most are
+ignored. Once the internal processing model settles down, this will
+provide actual information.
+
+=back
+
+=item B<-M>| B<--man>
+
+Prints the manpage for the program, and exits.
+
+=item B<-V> | B<--version>
+
+Prints the version of the program, and exits.
+
+=back
+
+=head2 GLOBAL PROCESSING OPTIONS
+
+=over 8
+
+=item B<-V> | B<--verbose>
+
+Asks automkv to produce more information about its internal
+processing. Currently this doesn't do much as automkv is often already
+too verbose.
+
+=item B<-D> | B<--debug>
+
+Asks automkv to dump various data structures as it works, so that one
+can attempt to figure out what its doing, and debug it. Even if you
+are not trying to fix the progam, this can be useful just to see what
+internal processing tags are being used. These are good candidates to
+use to tweak automkv's behavior using the -A flag below.
+
+=item B<-A> | B<--assume> TAG=VALUE
+
+Tells automkv to assume something about file it is processing. This
+can be used to provide information to automkv that it would not
+otherwise be able to gather. A full set of accepted tags and their
+meanings can be gathered by calling automkv with '--show tags', but
+here's a partial list:
+
+=over 12
+
+=item B<name>
+
+This tells automkv to what to assume for the untagged part of the
+filename, rather than deriving it by stripping tags off the filename.
+
+=item B<showname>
+
+If automkv knows the name of the show, it will assume that the file
+stem is an episode name.
+
+=item B<episodes>
+
+If automkv knows the total number of seasons it will ensure that no
+more digits are used for an episode number than will be required. It
+will also use the number of episodes to produce tags like 'xx of yy'
+for files that lack a season number (such as miniseries and
+documentaries).
+
+=item B<seasons>
+
+Tells automkv how many seasons there are in a show. This is useful to
+make it use more or few digits in a season name.
+
+=back
+
+=item B<-L> | B<--default-language> STR
+
+Specifies the language to be assumed for all stream content that
+doesn't otherwise have a specified language. This takes a 3-letter ISO
+code for the language. The current list of accepted ISO codes can be
+determined from the "--show lang" option.
+
+If no default language is specified, the default-default is English (eng).
+
+=item B<-P> | B<--default-presentation> STR
+
+This gives a default 'presentation' name that is used as an internal
+title of all tracks which follow (and which do not explicitly specify
+titles or presentation names of their own) until changed by another
+use of this option.
+
+If not set, the default for this is 'Feature' which means that all
+sound, video and subtitle tracks which are found will default to a
+title of 'Feature' to indicate that they are part of the main feature
+presentation.
+
+=back
+
+=cut
